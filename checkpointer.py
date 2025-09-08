@@ -1,19 +1,20 @@
 import pickle
+from typing import Any
 
 class Cornifer():
     @staticmethod
-    def save(data, filename, suffix=None):
+    def save(data: Any, filename: str, suffix: str | None = None) -> None:
         with open(f'{filename}_{suffix}.pkl', "wb") as f:
             pickle.dump(data, f)
 
     @staticmethod
-    def checkpoint(data, filename, epoch, suffix=None):
+    def checkpoint(data: Any, filename: str, epoch: int, suffix: str | None = None) -> None:
         with open(f'{filename}_{suffix}.pkl', "wb") as f:
             pickle.dump(data, f)
         print(f"Cornifer: checkpoint made for epoch: {epoch}")
     
     @staticmethod
-    def load(filename, suffix):
+    def load(filename: str, suffix: str) -> Any | None:
         try:
             with open(f'{filename}_{suffix}.pkl', "rb") as f:
                 data = pickle.load(f)
