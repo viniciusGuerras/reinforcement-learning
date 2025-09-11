@@ -1,5 +1,6 @@
 from torch.utils.tensorboard import SummaryWriter
-from utils import ReplayBuffer, QNetwork
+from misc.utils import ReplayBuffer, QNetwork
+from dataclasses import dataclass
 import torch.optim as optim
 from typing import Tuple
 import torch.nn as nn
@@ -7,59 +8,63 @@ import numpy as np
 import torch
 import os
 
+@dataclass
+class DQNConfig():
+    state_dim: int
+    n_actions: int
+    batch_size: int = 64
+    mem_size: int = 100_000
+    epsilon: float = 1.0
+    epsilon_decay: float = 1e-3
+    epsilon_min: float = 0.01
+    epsilon_decay_strategy: str = "linear"
+    dr_gamma: float = 0.99
+    lr_alpha: float = 1e-3
+    tau: float = 0.05
+    checkpoint_path: str = "dqn_checkpoint.pth"
+    run_dir: str = "runs/dqn_experiment"
+    load: bool = False
+
 class DQNAgent():
-    def __init__(self,
-                 state_dim: int,
-                 n_actions: int,
-                 batch_size: int = 64,
-                 mem_size: int = 100_000,
-                 epsilon: float = 1.0,
-                 epsilon_decay: float = 1e-3,
-                 epsilon_minimum: float = 0.01,
-                 epsilon_decay_strategy: str = "linear",
-                 discount_rate_gamma: float = 0.99, 
-                 learning_rate_alpha: float = 1e-3,
-                 tau_update: float = 0.05,
-                 load: bool = False,
-                 path: str = 'dqn_checkpoint'
-                 ) -> None:
+    def __init__(self, config: DQNConfig) -> None:
+        self.config = config
         # learning sensitivity
-        self.discount_rate_gamma: float = discount_rate_gamma
-        self.learning_rate_alpha: float = learning_rate_alpha
+        self.dr_gamma: float = config.dr_gamma
+        self.lr_alpha: float = config.lr_alpha
         
         # info on environment
-        self.state_dim: int = state_dim
-        self.n_actions: int = n_actions
+        self.state_dim: int = config.state_dim
+        self.n_actions: int = config.n_actions
 
         # memory retrieve size
-        self.batch_size: int = batch_size
-        self.max_memory_size: int = mem_size
+        self.batch_size: int = config.batch_size
+        self.max_memory_size: int = config.mem_size
 
         # exploration/exploitation
-        self.epsilon: float = epsilon
-        self.epsilon_decay: float = epsilon_decay
-        self.epsilon_minimum: float = epsilon_minimum
-        self.epsilon_decay_strategy = epsilon_decay_strategy
+        self.epsilon: float = config.epsilon
+        self.epsilon_decay: float = config.epsilon_decay
+        self.epsilon_min: float = config.epsilon_min
+        self.epsilon_decay_strategy = config.epsilon_decay_strategy
 
         # to update the target
         self.steps_taken: int = 0
-        self.tau_update: float = tau_update
+        self.tau: float = config.tau
     
         self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.memory: ReplayBuffer = ReplayBuffer(self.max_memory_size)
 
         # both nets
-        self.policy_net: QNetwork = QNetwork(self.state_dim, n_actions).to(self.device)
-        self.target_net: QNetwork = QNetwork(self.state_dim, n_actions).to(self.device)
+        self.policy_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
+        self.target_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
-        self.optimizer: optim.Optimizer = optim.Adam(self.policy_net.parameters(), lr=self.learning_rate_alpha, amsgrad=True)
+        self.optimizer: optim.Optimizer = optim.Adam(self.policy_net.parameters(), lr=self.lr_alpha, amsgrad=True)
 
-        self.writer = SummaryWriter(log_dir=f'runs/dqn_experiment')
+        self.writer = SummaryWriter(log_dir=config.run_dir)
 
-        if load:
-            self.load_checkpoint(f'{path}.pth')
+        if config.load:
+            self.load_checkpoint(f'{config.checkpoint_path}')
 
         #after reading grokking deep reinforcement learning I understood that the loss doesn't need to punish high errors like MSE
         self.loss: nn.Module = nn.HuberLoss()
@@ -77,14 +82,14 @@ class DQNAgent():
         #soft update in the replacement of the target and policy network
         for target_param, param in zip(self.target_net.parameters(), self.policy_net.parameters()):
             target_param.data.copy_(
-                self.tau_update * param.data + (1 - self.tau_update) * target_param.data
+                self.tau * param.data + (1 - self.tau) * target_param.data
             )
 
     def reduce_exploration(self) -> None:  
         if self.epsilon_decay_strategy == "linear":
-            self.epsilon = max(self.epsilon - self.epsilon_decay, self.epsilon_minimum)
+            self.epsilon = max(self.epsilon - self.epsilon_decay, self.epsilon_min)
         else:
-            self.epsilon = max(self.epsilon * (1 - self.epsilon_decay), self.epsilon_minimum)
+            self.epsilon = max(self.epsilon * self.epsilon_decay, self.epsilon_min)
         self.writer.add_scalar("Policy/epsilon", self.epsilon, self.steps_taken)
 
     def store_transition(self, state: np.ndarray, action: int, reward: float, state_: np.ndarray, terminated: bool) -> None:
@@ -107,7 +112,6 @@ class DQNAgent():
             'target_net_state_dict': self.target_net.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'steps_taken': self.steps_taken,
-            'replay_buffer': self.memory  
         }
 
         torch.save(checkpoint, path)
@@ -121,7 +125,6 @@ class DQNAgent():
                 self.target_net.load_state_dict(checkpoint['target_net_state_dict'])
                 self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
                 self.steps_taken = checkpoint['steps_taken']
-                self.memory = checkpoint['replay_buffer']
                 print(f"Checkpoint '{path}' loaded successfully!")
             except (EOFError, RuntimeError, KeyError) as e:
                 print(f"Failed to load checkpoint '{path}': {e}")
@@ -138,7 +141,7 @@ class DQNAgent():
         q_pred: torch.Tensor = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
             q_next: torch.Tensor = self.target_net(states_).max(1)[0]
-            q_target: torch.Tensor = rewards + self.discount_rate_gamma * q_next * (1.0 - dones)
+            q_target: torch.Tensor = rewards + self.dr_gamma * q_next * (1.0 - dones)
 
         loss: torch.Tensor = self.loss(q_pred, q_target)
         self.writer.add_scalar("Loss/train", loss.item(), self.steps_taken)
@@ -149,7 +152,7 @@ class DQNAgent():
 
         self.steps_taken += 1
         self.replace_network()
-        self.reduce_exploration()
+    
 
 
 
