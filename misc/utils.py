@@ -7,6 +7,7 @@ import random
 import torch
 import math
 
+#for value-based models
 class QNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=128):
         super().__init__()
@@ -17,6 +18,20 @@ class QNetwork(nn.Module):
             nn.ReLU(),
             nn.Linear(hidden_dim, action_dim)
         )
+    def forward(self, x):
+        return self.net(x)
+
+#for policy-gradient models
+class PolicyNetwork(nn.Module):
+    def __init__(self, state_dim, action_dim, hidden_dim):
+        super(PolicyNetwork, self).__init__()
+        self.net = nn.Sequential(
+            nn.Linear(state_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, action_dim),
+            nn.Softmax()
+        )
+
     def forward(self, x):
         return self.net(x)
 
@@ -100,12 +115,9 @@ class NoisyLinear(nn.Module):
 class FactorizedNoisyDuelingQNetwork(nn.Module):
     def __init__(self, state_dim, action_dim, hidden_dim=128, sigma_zero=0.4):
         super().__init__()
-        # shared feature extractor (one FC layer here — you can expand)
         self.fc1 = nn.Linear(state_dim, hidden_dim)
-        # advantage stream
         self.adv_fc = nn.Linear(hidden_dim, hidden_dim)
         self.noisy_adv = NoisyLinear(hidden_dim, action_dim, sigma_zero=sigma_zero)
-        # value stream
         self.val_fc = nn.Linear(hidden_dim, hidden_dim)
         self.noisy_val = NoisyLinear(hidden_dim, 1, sigma_zero=sigma_zero)
 
@@ -113,8 +125,8 @@ class FactorizedNoisyDuelingQNetwork(nn.Module):
         feat = F.relu(self.fc1(x))
         adv_h = F.relu(self.adv_fc(feat))
         val_h = F.relu(self.val_fc(feat))
-        adv = self.noisy_adv(adv_h)   # shape (batch, action_dim)
-        val = self.noisy_val(val_h)   # shape (batch, 1)
+        adv = self.noisy_adv(adv_h)   
+        val = self.noisy_val(val_h)   
         adv_mean = adv.mean(dim=1, keepdim=True)
         q = val + adv - adv_mean
         return q

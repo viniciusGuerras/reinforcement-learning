@@ -1,5 +1,5 @@
 from torch.utils.tensorboard import SummaryWriter
-from misc.utils import ReplayBuffer, QNetwork
+from misc.utils import ReplayBuffer, QNetwork, DuelingQNetwork
 from dataclasses import dataclass
 import torch.optim as optim
 from typing import Tuple
@@ -12,7 +12,7 @@ import os
 class DQNConfig():
     state_dim: int
     n_actions: int
-    batch_size: int = 64
+    batch_size: int = 256
     mem_size: int = 100_000
     epsilon: float = 1.0
     epsilon_decay: float = 1e-3
@@ -23,7 +23,10 @@ class DQNConfig():
     tau: float = 0.05
     checkpoint_path: str = "dqn_checkpoint.pth"
     run_dir: str = "runs/dqn_experiment"
+    net_update_value = 100
     load: bool = False
+    DDQN: bool = False
+    Dueling: bool = False
 
 class DQNAgent():
     def __init__(self, config: DQNConfig) -> None:
@@ -48,20 +51,26 @@ class DQNAgent():
 
         # to update the target
         self.steps_taken: int = 0
-        self.tau: float = config.tau
+        self.replace_net_every = config.net_update_value
     
         self.device: torch.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.memory: ReplayBuffer = ReplayBuffer(self.max_memory_size)
 
         # both nets
-        self.policy_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
-        self.target_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
+        if config.Dueling:
+            self.policy_net: DuelingQNetwork= DuelingQNetwork(self.state_dim, config.n_actions).to(self.device)
+            self.target_net: DuelingQNetwork = DuelingQNetwork(self.state_dim, config.n_actions).to(self.device)
+        else:
+            self.policy_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
+            self.target_net: QNetwork = QNetwork(self.state_dim, config.n_actions).to(self.device)
+
         self.target_net.load_state_dict(self.policy_net.state_dict())
 
         self.optimizer: optim.Optimizer = optim.Adam(self.policy_net.parameters(), lr=self.lr_alpha, amsgrad=True)
 
         self.writer = SummaryWriter(log_dir=config.run_dir)
+        self.DDQN = config.DDQN
 
         if config.load:
             self.load_checkpoint(f'{config.checkpoint_path}')
@@ -79,11 +88,8 @@ class DQNAgent():
             return int(np.random.choice(range(self.n_actions)))
 
     def replace_network(self) -> None:
-        #soft update in the replacement of the target and policy network
-        for target_param, param in zip(self.target_net.parameters(), self.policy_net.parameters()):
-            target_param.data.copy_(
-                self.tau * param.data + (1 - self.tau) * target_param.data
-            )
+        if self.steps_taken % self.replace_net_every == 0:
+            self.target_net.load_state_dict(self.policy_net.state_dict())
 
     def reduce_exploration(self) -> None:  
         if self.epsilon_decay_strategy == "linear":
@@ -140,7 +146,11 @@ class DQNAgent():
 
         q_pred: torch.Tensor = self.policy_net(states).gather(1, actions.unsqueeze(1)).squeeze(1)
         with torch.no_grad():
-            q_next: torch.Tensor = self.target_net(states_).max(1)[0]
+            if self.DDQN:
+                next_actions = torch.argmax(self.policy_net(states_), dim=-1)
+                q_next: torch.Tensor = self.target_net(states_).gather(1, next_actions.unsqueeze(1)).squeeze(1)
+            else:
+                q_next: torch.Tensor = self.target_net(states_).max(1)[0]
             q_target: torch.Tensor = rewards + self.dr_gamma * q_next * (1.0 - dones)
 
         loss: torch.Tensor = self.loss(q_pred, q_target)
